@@ -238,7 +238,7 @@ class InteractiveGradioUI(GradioUI):
             )
 
             # NEW: Add approval interface (initially hidden)
-            with gr.Group(visible=False) as self.approval_interface:
+            with gr.Column(visible=False) as self.approval_interface:
                 gr.Markdown("## LLM Response Review")
                 
                 # Collapsible prompt section
@@ -382,27 +382,27 @@ class InteractiveGradioUI(GradioUI):
     
     def update_approval_interface(self, response, prompt):
         """Update the approval interface with the current response and prompt"""
-        # This method is called as a callback from the model
-        # We need to manually schedule UI updates since we're called from a different thread
+        # Update component values directly - no need to use update() on the container
+        
         # Show the interface by setting visible=True
-        self.approval_interface.update(visible=True)
+        self.approval_interface.visible = True
         
         # Update prompt display
         prompt_content = self._format_prompt(prompt)
-        self.prompt_display.update(value=prompt_content)
+        self.prompt_display.value = prompt_content
         
         # Update response display
         content = response.content if response else ""
-        self.response_box.update(value=content)
+        self.response_box.value = content
         
         # Update tool calls
         tool_calls_text = self._format_tool_calls(response)
-        self.tool_calls_box.update(value=tool_calls_text)
+        self.tool_calls_box.value = tool_calls_text
         
         # Update counter
         current = self.interactive_model.current_index + 1
         total = len(self.interactive_model.responses)
-        self.response_counter.update(value=f"Response {current} of {total}")
+        self.response_counter.value = f"Response {current} of {total}"
     
     def _format_prompt(self, prompt):
         """Format the prompt for display"""
@@ -497,7 +497,7 @@ class InteractiveGradioUI(GradioUI):
         # Approve the current response (this will set the event and allow the model to continue)
         self.interactive_model.approve_current()
         # Hide the approval interface
-        return gr.update(visible=False)
+        self.approval_interface.visible = False
 
 
 __all__ = [
