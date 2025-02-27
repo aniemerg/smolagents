@@ -3,6 +3,7 @@ from smolagents.gradio_ui import GradioUI
 from smolagents.models import GradioInteractiveLLMModel 
 import gradio as gr
 import json
+import re
 from typing import Optional
 
 from smolagents.agent_types import AgentAudio, AgentImage, AgentText, handle_agent_output_types
@@ -175,6 +176,7 @@ class InteractiveGradioUI(GradioUI):
         # Approval interface components (will be set during launch)
         self.approval_interface = None
         self.prompt_accordion = None
+        self.prompt_display = None
         self.response_box = None
         self.tool_calls_box = None
         self.response_counter = None
@@ -236,8 +238,7 @@ class InteractiveGradioUI(GradioUI):
             )
 
             # NEW: Add approval interface (initially hidden)
-            self.approval_interface = gr.Blocks(visible=False)
-            with self.approval_interface:
+            with gr.Group(visible=False) as self.approval_interface:
                 gr.Markdown("## LLM Response Review")
                 
                 # Collapsible prompt section
@@ -266,10 +267,11 @@ class InteractiveGradioUI(GradioUI):
                 [stored_messages, text_input, submit_btn],
             ).then(self.interact_with_agent_modified, [stored_messages, chatbot, session_state], [chatbot]).then(
                 lambda: (
-                    gr.Textbox(
-                        interactive=True, placeholder="Enter your prompt here and press Shift+Enter or the button"
+                    gr.update(
+                        interactive=True, 
+                        placeholder="Enter your prompt here and press Shift+Enter or the button"
                     ),
-                    gr.Button(interactive=True),
+                    gr.update(interactive=True),
                 ),
                 None,
                 [text_input, submit_btn],
@@ -281,10 +283,11 @@ class InteractiveGradioUI(GradioUI):
                 [stored_messages, text_input, submit_btn],
             ).then(self.interact_with_agent_modified, [stored_messages, chatbot, session_state], [chatbot]).then(
                 lambda: (
-                    gr.Textbox(
-                        interactive=True, placeholder="Enter your prompt here and press Shift+Enter or the button"
+                    gr.update(
+                        interactive=True, 
+                        placeholder="Enter your prompt here and press Shift+Enter or the button"
                     ),
-                    gr.Button(interactive=True),
+                    gr.update(interactive=True),
                 ),
                 None,
                 [text_input, submit_btn],
@@ -319,34 +322,74 @@ class InteractiveGradioUI(GradioUI):
     
     def interact_with_agent_modified(self, stored_message, chatbot, session_state):
         """Modified version of interact_with_agent that works with our interactive model"""
-        # This is a modified version of the original method that preserves most functionality
-        # but works with our interactive model
+        import threading
+        import queue
         
         # Get the agent from session state or use the template agent
         if "agent" not in session_state:
             session_state["agent"] = self.agent
-
-        try:
-            # The rest of the implementation is similar to the original
-            for msg in stream_to_gradio(session_state["agent"], task=stored_message, reset_agent_memory=False):
+        
+        # Create a queue for passing messages from the agent thread to the UI thread
+        message_queue = queue.Queue()
+        
+        # Flag to track if there was an error
+        had_error = [False]
+        error_message = [""]
+        
+        # Function to run the agent in a background thread
+        def run_agent_in_background():
+            try:
+                # Run the agent and put messages into the queue
+                for msg in stream_to_gradio(session_state["agent"], task=stored_message, reset_agent_memory=False):
+                    message_queue.put(msg)
+                
+                # Signal that we're done
+                message_queue.put(None)
+            except Exception as e:
+                print(f"Error in interaction: {str(e)}")
+                had_error[0] = True
+                error_message[0] = str(e)
+                message_queue.put(None)  # Signal that we're done, but with an error
+        
+        # Start the agent in a background thread
+        agent_thread = threading.Thread(target=run_agent_in_background)
+        agent_thread.daemon = True  # Make thread daemon so it doesn't prevent app shutdown
+        agent_thread.start()
+        
+        # Process messages from the queue
+        while True:
+            try:
+                # Get the next message with a short timeout to keep the UI responsive
+                msg = message_queue.get(timeout=0.1)
+                
+                # If we get None, that means the agent is done
+                if msg is None:
+                    break
+                
+                # Add the message to the chatbot
                 chatbot.append(msg)
                 yield chatbot
-
-            yield chatbot
-        except Exception as e:
-            print(f"Error in interaction: {str(e)}")
-            chatbot.append(gr.ChatMessage(role="assistant", content=f"Error: {str(e)}"))
+                
+            except queue.Empty:
+                # Queue is temporarily empty, yield the current chatbot state to keep UI responsive
+                yield chatbot
+        
+        # If there was an error, append it to the chatbot
+        if had_error[0]:
+            chatbot.append(gr.ChatMessage(role="assistant", content=f"Error: {error_message[0]}"))
             yield chatbot
     
     
     def update_approval_interface(self, response, prompt):
         """Update the approval interface with the current response and prompt"""
-        # Show the interface
-        self.approval_interface.visible=True
+        # This method is called as a callback from the model
+        # We need to manually schedule UI updates since we're called from a different thread
+        # Show the interface by setting visible=True
+        self.approval_interface.update(visible=True)
         
         # Update prompt display
         prompt_content = self._format_prompt(prompt)
-        self.prompt_accordion.update(content=prompt_content)
+        self.prompt_display.update(value=prompt_content)
         
         # Update response display
         content = response.content if response else ""
@@ -359,7 +402,7 @@ class InteractiveGradioUI(GradioUI):
         # Update counter
         current = self.interactive_model.current_index + 1
         total = len(self.interactive_model.responses)
-        self.response_counter.update(f"Response {current} of {total}")
+        self.response_counter.update(value=f"Response {current} of {total}")
     
     def _format_prompt(self, prompt):
         """Format the prompt for display"""
@@ -414,7 +457,8 @@ class InteractiveGradioUI(GradioUI):
         total = len(self.interactive_model.responses)
         counter_text = f"Response {current} of {total}"
         
-        return content, tool_calls_text, counter_text
+        # Return gr.update() objects for each component
+        return gr.update(value=content), gr.update(value=tool_calls_text), gr.update(value=counter_text)
     
     def handle_navigate_prev(self):
         """Handle previous button"""
@@ -429,7 +473,8 @@ class InteractiveGradioUI(GradioUI):
         total = len(self.interactive_model.responses)
         counter_text = f"Response {current} of {total}"
         
-        return content, tool_calls_text, counter_text
+        # Return gr.update() objects for each component
+        return gr.update(value=content), gr.update(value=tool_calls_text), gr.update(value=counter_text)
     
     def handle_navigate_next(self):
         """Handle next button"""
@@ -444,13 +489,15 @@ class InteractiveGradioUI(GradioUI):
         total = len(self.interactive_model.responses)
         counter_text = f"Response {current} of {total}"
         
-        return content, tool_calls_text, counter_text
+        # Return gr.update() objects for each component
+        return gr.update(value=content), gr.update(value=tool_calls_text), gr.update(value=counter_text)
     
     def handle_approve(self):
         """Handle approve button"""
+        # Approve the current response (this will set the event and allow the model to continue)
         self.interactive_model.approve_current()
+        # Hide the approval interface
         return gr.update(visible=False)
-
 
 
 __all__ = [
