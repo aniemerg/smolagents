@@ -16,6 +16,7 @@
 # limitations under the License.
 import json
 import logging
+import threading
 import os
 import random
 import uuid
@@ -896,6 +897,95 @@ class LiteLLMModel(Model):
         return message
 
 
+class GradioInteractiveLLMModel(LiteLLMModel):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.approval_event = threading.Event()
+        self.responses = []  # Store all generated responses
+        self.current_index = -1  # Index of currently viewed response
+        self.approved_response = None  # The final approved response
+        self.current_prompt = None
+        self.ui_callback = None
+    
+    def set_ui_callback(self, callback):
+        """Set callback function for UI updates"""
+        self.ui_callback = callback
+    
+    def __call__(self, messages, stop_sequences=None, grammar=None, tools_to_call_from=None, **kwargs):
+        """Override to intercept LLM calls"""
+        # Store prompt information
+        self.current_prompt = {
+            "messages": messages,
+            "stop_sequences": stop_sequences,
+            "grammar": grammar,
+            "tools_to_call_from": tools_to_call_from,
+            **kwargs
+        }
+        
+        # Reset state for new request
+        self.responses = []
+        self.current_index = -1
+        self.approved_response = None
+        
+        # Generate initial response
+        self.generate_new_response()
+        
+        # Notify UI to show approval interface
+        if self.ui_callback:
+            self.ui_callback(self.get_current_response(), self.current_prompt)
+        
+        # Wait for approval
+        self.approval_event.clear()
+        self.approval_event.wait()
+        
+        # Return the approved response
+        return self.approved_response
+    
+    def generate_new_response(self):
+        """Generate a new response and add it to the list"""
+        # Call the underlying model
+        response = super().__call__(
+            messages=self.current_prompt["messages"],
+            stop_sequences=self.current_prompt.get("stop_sequences"),
+            grammar=self.current_prompt.get("grammar"),
+            tools_to_call_from=self.current_prompt.get("tools_to_call_from"),
+            **{k: v for k, v in self.current_prompt.items() 
+               if k not in ["messages", "stop_sequences", "grammar", "tools_to_call_from"]}
+        )
+        
+        # Add to responses list and update current index
+        self.responses.append(response)
+        self.current_index = len(self.responses) - 1
+        
+        return response
+    
+    def get_current_response(self):
+        """Get the currently selected response"""
+        if not self.responses or self.current_index < 0:
+            return None
+        return self.responses[self.current_index]
+    
+    def navigate_previous(self):
+        """Navigate to previous response if available"""
+        if self.current_index > 0:
+            self.current_index -= 1
+            return self.get_current_response()
+        return None
+    
+    def navigate_next(self):
+        """Navigate to next response if available"""
+        if self.current_index < len(self.responses) - 1:
+            self.current_index += 1
+            return self.get_current_response()
+        return None
+    
+    def approve_current(self):
+        """Approve the currently selected response"""
+        if self.current_index >= 0 and self.current_index < len(self.responses):
+            self.approved_response = self.responses[self.current_index]
+            self.approval_event.set()
+
+
 class OpenAIServerModel(Model):
     """This model connects to an OpenAI-compatible API server.
 
@@ -1027,6 +1117,7 @@ __all__ = [
     "TransformersModel",
     "HfApiModel",
     "LiteLLMModel",
+    "GradioInteractiveLLMModel",
     "OpenAIServerModel",
     "AzureOpenAIServerModel",
     "ChatMessage",
