@@ -150,3 +150,10 @@ archive/
 savedir/
 output/
 tool_output/
+
+
+.gradio/
+agent_logs/
+file-format-commons/
+files/
+
