@@ -5,6 +5,7 @@ import gradio as gr
 import json
 import re
 from typing import Optional
+import threading
 
 from smolagents.agent_types import AgentAudio, AgentImage, AgentText, handle_agent_output_types
 from smolagents.agents import ActionStep, MultiStepAgent
@@ -169,7 +170,7 @@ class InteractiveGradioUI(GradioUI):
         # Check if model is our interactive type and set callback
         if hasattr(agent, 'model') and isinstance(agent.model, GradioInteractiveLLMModel):
             self.interactive_model = agent.model
-            self.interactive_model.set_ui_callback(self.update_approval_interface)
+            self.interactive_model.set_ui_callback(self.handle_model_update)
         else:
             raise ValueError("Agent must use a GradioInteractiveLLMModel")
         
@@ -180,6 +181,11 @@ class InteractiveGradioUI(GradioUI):
         self.response_box = None
         self.tool_calls_box = None
         self.response_counter = None
+        
+        # For thread communication
+        self.ui_update_needed = threading.Event()
+        self.response_data = None
+        self.prompt_data = None
     
     def launch(self, share: bool = True, **kwargs):
         import gradio as gr
@@ -238,7 +244,7 @@ class InteractiveGradioUI(GradioUI):
             )
 
             # NEW: Add approval interface (initially hidden)
-            with gr.Column(visible=False) as self.approval_interface:
+            with gr.Column(visible=True) as self.approval_interface:
                 gr.Markdown("## LLM Response Review")
                 
                 # Collapsible prompt section
@@ -260,6 +266,31 @@ class InteractiveGradioUI(GradioUI):
                     generate_btn = gr.Button("Generate New Response")
                     approve_btn = gr.Button("Approve Selected")
 
+            # Add a periodic UI update to check for update events (every 0.5 seconds)
+            #ui_update_timer = gr.Timer(0.5, self.update_approval_interface, 
+            #                           inputs=None, 
+            #                           outputs=[
+            #                               self.approval_interface,
+            #                               self.prompt_display,
+            #                               self.response_box,
+            #                               self.tool_calls_box,
+            #                               self.response_counter
+            #                           ])
+            ui_update_timer = gr.Timer(0.5)
+
+            # Connect the timer to your update function with proper outputs
+            ui_update_timer.tick(
+                fn=self.update_approval_interface,
+                inputs=None,
+                outputs=[
+                    self.approval_interface,
+                    self.prompt_display,
+                    self.response_box, 
+                    self.tool_calls_box,
+                    self.response_counter
+                ]
+            )
+                                       
             # Set up event handlers (preserved from original)
             text_input.submit(
                 self.log_user_message,
@@ -380,30 +411,52 @@ class InteractiveGradioUI(GradioUI):
             yield chatbot
     
     
-    def update_approval_interface(self, response, prompt):
-        """Update the approval interface with the current response and prompt"""
-        # Update component values directly - no need to use update() on the container
+    def handle_model_update(self, response, prompt):
+        """Called by the model when approval is needed"""
+        # Store the data for the UI to use
+        self.response_data = response
+        self.prompt_data = prompt
         
-        # Show the interface by setting visible=True
-        self.approval_interface.visible = True
+        # Signal that an update is needed
+        self.ui_update_needed.set()
         
-        # Update prompt display
+    def update_approval_interface(self):
+        """Updates the approval interface - called from Gradio event loop"""
+        if not self.ui_update_needed.is_set():
+            # No update needed - return unchanged values for all outputs
+            return [
+                gr.update(),  # approval_interface
+                gr.update(),  # prompt_display
+                gr.update(),  # response_box
+                gr.update(),  # tool_calls_box
+                gr.update()   # response_counter
+            ]
+        
+        # Clear the event
+        self.ui_update_needed.clear()
+        
+        # Get the data
+        response = self.response_data
+        prompt = self.prompt_data
+        
+        # Format the data
         prompt_content = self._format_prompt(prompt)
-        self.prompt_display.value = prompt_content
-        
-        # Update response display
         content = response.content if response else ""
-        self.response_box.value = content
-        
-        # Update tool calls
         tool_calls_text = self._format_tool_calls(response)
-        self.tool_calls_box.value = tool_calls_text
         
-        # Update counter
+        # Get counter values
         current = self.interactive_model.current_index + 1
         total = len(self.interactive_model.responses)
-        self.response_counter.value = f"Response {current} of {total}"
-    
+        counter_text = f"Response {current} of {total}"
+        
+        # Return updates
+        return [
+            gr.update(visible=True),  # approval_interface
+            gr.update(value=prompt_content),  # prompt_display
+            gr.update(value=content),  # response_box
+            gr.update(value=tool_calls_text),  # tool_calls_box
+            gr.update(value=counter_text)  # response_counter
+        ]
     def _format_prompt(self, prompt):
         """Format the prompt for display"""
         if not prompt or "messages" not in prompt:
@@ -497,7 +550,7 @@ class InteractiveGradioUI(GradioUI):
         # Approve the current response (this will set the event and allow the model to continue)
         self.interactive_model.approve_current()
         # Hide the approval interface
-        self.approval_interface.visible = False
+        return gr.update(visible=False)
 
 
 __all__ = [
