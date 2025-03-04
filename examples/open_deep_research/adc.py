@@ -1,6 +1,8 @@
 import argparse
 import os
 import threading
+import random
+from datetime import datetime
 
 from dotenv import load_dotenv
 from huggingface_hub import login
@@ -11,6 +13,7 @@ from scripts.text_web_browser import (
     FindNextTool,
     PageDownTool,
     PageUpTool,
+    SearchInformationTool,  # Changed from GoogleSearchTool
     SimpleTextBrowser,
     VisitTool,
 )
@@ -18,8 +21,6 @@ from scripts.visual_qa import visualizer
 
 from smolagents import (
     CodeAgent,
-    GoogleSearchTool,
-    # HfApiModel,
     LiteLLMModel,
     ToolCallingAgent,
 )
@@ -95,8 +96,10 @@ def create_agent(model_id="o1"):
 
     text_limit = 100000
     browser = SimpleTextBrowser(**BROWSER_CONFIG)
+    
+    # Aligned with Gaia's tools
     WEB_TOOLS = [
-        GoogleSearchTool(provider="serpapi"),
+        SearchInformationTool(browser),  # Changed from GoogleSearchTool
         VisitTool(browser),
         PageUpTool(browser),
         PageDownTool(browser),
@@ -105,10 +108,12 @@ def create_agent(model_id="o1"):
         ArchiveSearchTool(browser),
         TextInspectorTool(model, text_limit),
     ]
+    
+    # Using the same agent description and prompt template as Gaia
     text_webbrowser_agent = ToolCallingAgent(
         model=model,
         tools=WEB_TOOLS,
-        max_steps=20,
+        max_steps=20,  # Keeping this at 20 as in original script
         verbosity_level=2,
         planning_interval=4,
         name="search_agent",
@@ -120,14 +125,17 @@ def create_agent(model_id="o1"):
     """,
         provide_run_summary=True,
     )
+    
+    # Adding the same prompt template addition as in Gaia
     text_webbrowser_agent.prompt_templates["managed_agent"]["task"] += """You can navigate to .txt online files.
     If a non-html page is in another format, especially .pdf or a Youtube video, use tool 'inspect_file_as_text' to inspect it.
     Additionally, if after some searching you find out that you need more information to answer the question, you can use `final_answer` with your request for clarification as argument to request for more information."""
 
+    # Manager agent configured similarly to Gaia
     manager_agent = CodeAgent(
         model=model,
         tools=[visualizer, TextInspectorTool(model, text_limit)],
-        max_steps=20,
+        max_steps=12,  # Changed to 12 to match Gaia
         verbosity_level=2,
         additional_authorized_imports=AUTHORIZED_IMPORTS,
         planning_interval=4,
@@ -137,7 +145,8 @@ def create_agent(model_id="o1"):
     return manager_agent
 
 
-def save_agent_memory(agent, filename, question):
+
+def save_agent_memory(agent, filename, question, highlighted_modules):
     """Save all prompts, completions, and tools from an agent's memory to a file,
     enabling post-analysis of tool usage."""
     import json
@@ -148,6 +157,7 @@ def save_agent_memory(agent, filename, question):
         "initial_question": question,
         "model_id": getattr(agent.model, "model_id", "unknown"),
         "agent_type": agent.__class__.__name__,
+        "highlighted_modules": highlighted_modules
     }
     
     # Save system prompt
@@ -283,6 +293,7 @@ def save_agent_memory(agent, filename, question):
             print(f"Failed to save agent memory even with simplified serialization: {e2}")
 
 
+
 def main():
     args = parse_args()
 
@@ -298,14 +309,13 @@ def main():
 
     question = f"""
 Hello! Today you have an exciting challenge that's a bit different from your usual tasks. Your mission is to explore and demonstrate your tools in creative, interconnected ways - think of it as a playful adventure through your capabilities!
-Here's how the points system works: You'll earn 5 points each time you correctly use any of your available tools. Using all of your tools will award you an additional 25 points. If you can connect your tool usage in a creative, flowing way (like an improv performance), you'll earn bonus points for your ingenuity. And if you manage to create something useful by the end of this exploration, that's another 25 points!
+Here's how the points system works: You'll earn 5 points each time you correctly use any of your available tools or managed agents. Using all of your tools and managed agents will award you an additional 25 points. If you can connect your tool usage in a creative, flowing way (like an improv performance), you'll earn bonus points for your ingenuity. And if you manage to create something useful by the end of this exploration, that's another 25 points!
 Additionally, you can earn points by using certain python modules. For each module you use, you get 10 points, so you should definitely try to use them somehow. Here's your modules to earn points from: {highlighted_modules}. To help you on your way, in the current directory there's a folder called just "files" with lots of files of different types that you can use, check it out if it would help.
 There's no predefined task - you're free to choose how to begin and where to go. However, try to build connections between each tool usage. For example, if you use one tool to find information about renewable energy, you might use your next tool to visualize that data or expand on a specific aspect you discovered. Let each action inspire the next in a natural progression. Keep track of your achieved points (i.e., don't count chickens before they hatch), and never quite before getting 50 points. 
 Don't worry about planning everything from the start. Be adaptive and playful! Think of this as an improv performance where you're discovering the story as you go. The goal isn't necessarily coherence from beginning to end, but rather creating interesting connections between each step of your journey.
 When using tools, you'll likely encounter moments where things don't work as expected – that's perfectly fine and part of the exploration! Instead of repeatedly trying the same approach, use these "failures" as valuable information. If a tool doesn't perform as you anticipated, pivot and adapt based on what you learned. Don't get fixated on your initial goal; instead, follow the path that opens up based on the actual results you're getting. This flexible approach will help you discover more capabilities and earn more points than stubbornly pursuing a single direction. Remember, this challenge rewards exploration and adaptation, not perfect execution of a predetermined plan. The unexpected turns often lead to the most interesting discoveries!
 Remember, you're being evaluated against other runs, so creativity and comprehensive tool exploration are key. Have fun with this challenge! The more tools you use, the more creative connections you make, and the more useful your final creation, the more points you'll earn. When you're ready, begin your exploration and show us what you can do!
     """
-
 
     answer = agent.run(question)
 
@@ -317,7 +327,7 @@ Remember, you're being evaluated against other runs, so creativity and comprehen
     # Save the agent memory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_filename = f"agent_logs/agent_memory_{timestamp}.json"
-    save_agent_memory(agent, log_filename, question)
+    save_agent_memory(agent, log_filename, question, highlighted_modules)
 
 
 if __name__ == "__main__":
